@@ -1,0 +1,206 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use FindBin ();
+use File::Spec;
+use Cwd qw(abs_path);
+use Getopt::Long qw(:config no_ignore_case bundling);
+
+BEGIN {
+    my $root = abs_path(File::Spec->catdir($FindBin::RealBin, File::Spec->updir));
+
+    # Prepend local app-codit-mt build/source paths
+    for my $rel (
+        File::Spec->catdir('blib', 'arch'),
+        File::Spec->catdir('blib', 'lib'),
+        'lib',
+    ) {
+        my $dir = File::Spec->catdir($root, $rel);
+        unshift @INC, $dir if -d $dir;
+    }
+
+    # Resolve Tcl::Tk::MT: @INC -> $ENV{TCL_TK_MT_DIR}/blib -> ../tcl-tk-mt/blib
+    my $has_tkmt = 0;
+    for my $inc (@INC) {
+        next if ref($inc);
+        if (-f File::Spec->catfile($inc, 'Tcl', 'Tk', 'MT.pm')) {
+            $has_tkmt = 1;
+            last;
+        }
+    }
+    if (!$has_tkmt) {
+        my @candidates;
+        push @candidates, $ENV{TCL_TK_MT_DIR}
+            if defined $ENV{TCL_TK_MT_DIR} && length $ENV{TCL_TK_MT_DIR};
+        push @candidates, File::Spec->catdir($root, File::Spec->updir, 'tcl-tk-mt');
+
+        for my $base (@candidates) {
+            my $blib_lib  = File::Spec->catdir($base, 'blib', 'lib');
+            my $blib_arch = File::Spec->catdir($base, 'blib', 'arch');
+            my $src_lib   = File::Spec->catdir($base, 'lib');
+            if (-d $blib_lib) {
+                unshift @INC, $blib_arch if -d $blib_arch;
+                unshift @INC, $blib_lib;
+                last;
+            }
+            elsif (-d $src_lib) {
+                unshift @INC, $src_lib;
+                last;
+            }
+        }
+    }
+}
+
+my $engine       = 'gpu';
+my $backend      = 'auto';
+my $workspace;
+my $auto_exit_ms = 0;
+my $headless     = 0;
+my $bench_file;
+my $frames       = 120;
+my $json_out     = 0;
+my $show_help    = 0;
+my $show_version = 0;
+
+GetOptions(
+    'engine=s'       => \$engine,
+    'backend=s'      => \$backend,
+    'workspace=s'    => \$workspace,
+    'auto-exit-ms=i' => \$auto_exit_ms,
+    'headless!'      => \$headless,
+    'bench-file=s'   => \$bench_file,
+    'frames=i'       => \$frames,
+    'json!'          => \$json_out,
+    'help|h'         => \$show_help,
+    'version|V'      => \$show_version,
+) or die "Run '$0 --help' for usage.\n";
+
+if ($show_help) {
+    print <<'USAGE';
+Usage: codit-mt [options] [files_or_dir...]
+
+Options:
+  --engine=gpu|tktext               Editor viewport engine (default: gpu)
+  --backend=auto|metal|vulkan|software|off
+                                    GPU rendering backend (default: auto)
+  --workspace=DIR                   Workspace root directory
+  --auto-exit-ms=N                  Auto-exit GUI after N milliseconds
+  --headless                        Run without interactive window
+  --bench-file=PATH                 File to open and scroll in headless bench
+  --frames=N                        Frames to render in headless bench (default: 120)
+  --json                            Emit headless bench results as JSON
+  -V, --version                     Show version and exit
+  -h, --help                        Show this help message
+USAGE
+    exit 0;
+}
+
+$engine  = lc($engine  // 'gpu');
+$backend = lc($backend // 'auto');
+
+die "Invalid --engine '$engine' (expected 'gpu' or 'tktext')\n"
+    unless $engine eq 'gpu' || $engine eq 'tktext';
+die "Invalid --backend '$backend' (expected auto|metal|vulkan|software|off)\n"
+    unless $backend =~ /\A(?:auto|metal|vulkan|software|off)\z/;
+
+if ($backend eq 'off') {
+    $ENV{TCL_TK_MT_ACCEL} = 'off';
+}
+elsif ($backend ne 'auto') {
+    $ENV{TCL_TK_MT_BACKEND} = $backend;
+}
+
+require App::Codit::MT;
+
+if ($show_version) {
+    print "App::Codit::MT $App::Codit::MT::VERSION\n";
+    exit 0;
+}
+
+my @files;
+for my $arg (@ARGV) {
+    if (-d $arg) {
+        $workspace = $arg unless defined $workspace;
+    }
+    else {
+        push @files, $arg;
+    }
+}
+
+if (!defined $workspace) {
+    if (@files && -f $files[0]) {
+        my ($vol, $dir, undef) = File::Spec->splitpath(abs_path($files[0]));
+        $workspace = File::Spec->catpath($vol, $dir, '');
+    }
+    else {
+        $workspace = Cwd::getcwd();
+    }
+}
+
+my $app = App::Codit::MT->new(
+    engine       => $engine,
+    backend      => $backend,
+    workspace    => $workspace,
+    headless     => $headless,
+    auto_exit_ms => $auto_exit_ms,
+);
+
+if ($headless) {
+    my $target = $bench_file // $files[0];
+    my $res = $app->run_headless_bench(
+        file   => $target,
+        frames => $frames,
+    );
+    if ($json_out) {
+        print _encode_json($res), "\n";
+    }
+    else {
+        printf "App::Codit::MT headless bench: engine=%s backend=%s lines=%d open=%.2fms frames=%d fps=%.1f p50=%.3fms p95=%.3fms\n",
+            $res->{engine}, $res->{backend}, $res->{lines}, $res->{open_ms},
+            $res->{frames}, $res->{fps}, $res->{p50_ms}, $res->{p95_ms};
+    }
+    $app->shutdown();
+    exit 0;
+}
+
+if (@files) {
+    for my $f (@files) {
+        $app->open_file($f);
+    }
+}
+else {
+    $app->new_document();
+}
+
+$app->run();
+exit 0;
+
+sub _encode_json {
+    my ($val) = @_;
+    return 'null' unless defined $val;
+    if (ref($val) eq 'HASH') {
+        my @pairs;
+        for my $k (sort keys %$val) {
+            push @pairs, _json_str($k) . ':' . _encode_json($val->{$k});
+        }
+        return '{' . join(',', @pairs) . '}';
+    }
+    if (ref($val) eq 'ARRAY') {
+        return '[' . join(',', map { _encode_json($_) } @$val) . ']';
+    }
+    if ($val =~ /\A-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\z/) {
+        return $val;
+    }
+    return _json_str($val);
+}
+
+sub _json_str {
+    my ($s) = @_;
+    $s =~ s/\\/\\\\/g;
+    $s =~ s/"/\\"/g;
+    $s =~ s/\n/\\n/g;
+    $s =~ s/\r/\\r/g;
+    $s =~ s/\t/\\t/g;
+    return '"' . $s . '"';
+}

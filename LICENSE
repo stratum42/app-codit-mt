@@ -1,0 +1,16 @@
+App::Codit::MT is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself, either:
+
+  a) the GNU General Public License as published by the Free Software
+     Foundation; either version 1, or (at your option) any later version, or
+
+  b) the "Artistic License" which comes with Perl.
+
+See `perldoc perlartistic` and `perldoc perlgpl` for the full text of both
+licenses.
+
+CREDITS & ACKNOWLEDGMENTS
+
+App::Codit::MT is inspired by the design, layout, and plugin architecture of
+App::Codit and Tk::CodeText by Hans Jeuken. It also builds on the foundations
+of Tcl::Tk, Tcl/Tk, and the Perl 5 community.
